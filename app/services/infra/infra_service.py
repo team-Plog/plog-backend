@@ -109,6 +109,7 @@ async def process_updated_server_infra_resource_usage(
     deploy_service = DeployService()
     resource_service = ResourceService()
     logger.info(f"Request recived {request.model_dump()}")
+    workload_type = None
 
     # 현재 배포되어 있는 resource info 조회
     stmt = (
@@ -152,22 +153,49 @@ async def process_updated_server_infra_resource_usage(
 
     # Git hooks 없이 배포된 경우 version detail 자동 생성
     if not version_detail:
-        logger.warning(f"Version detail not found for {request.group_name}, creating default detail from deployment")
+        logger.warning(f"Version detail not found for {request.group_name}, creating default detail from workload")
 
         try:
-            # ServerInfra의 name을 deployment 이름으로 사용
+            # ServerInfra의 name을 pod 이름으로 사용
             pod_name = first_server_infra.name
             namespace = first_server_infra.namespace or "test"
 
-            # DeployService를 통해 version detail 생성 및 저장
-            version_detail = await create_and_save_version_detail(
-                db=db,
-                openapi_spec_version_id=openapi_spec_version.id,
-                pod_name=pod_name,
-                namespace=namespace
-            )
+            # Pod 정보 조회하여 워크로드 타입 확인
+            pod_service = PodService()
+            pod_info = pod_service.get_pod_details_with_owner_info(pod_name)
 
-            logger.info(f"Successfully created version detail for {request.group_name}")
+            if not pod_info:
+                raise Exception(f"Could not find pod: {pod_name}")
+
+            workloads = pod_service.find_workloads_for_pod(pod_info["labels"])
+
+            if not workloads:
+                raise Exception(f"Could not find workload for pod: {pod_name}")
+
+            workload = workloads[0]  # 첫 번째 워크로드 사용
+            workload_type = workload["type"]
+
+            logger.info(f"Found workload type: {workload_type} for pod: {pod_name}")
+
+            # 워크로드 타입별로 분기 처리
+            if workload_type == "Deployment":
+                version_detail = await create_and_save_version_detail(
+                    db=db,
+                    openapi_spec_version_id=openapi_spec_version.id,
+                    pod_name=pod_name,
+                    namespace=namespace
+                )
+            elif workload_type == "StatefulSet":
+                version_detail = await create_and_save_version_detail_from_statefulset(
+                    db=db,
+                    openapi_spec_version_id=openapi_spec_version.id,
+                    pod_name=pod_name,
+                    namespace=namespace
+                )
+            else:
+                raise Exception(f"Unsupported workload type: {workload_type}")
+
+            logger.info(f"Successfully created version detail for {request.group_name} from {workload_type}")
 
         except Exception as e:
             logger.error(f"Failed to create version detail for {request.group_name}: {e}")
@@ -196,7 +224,10 @@ async def process_updated_server_infra_resource_usage(
     await db.commit()
 
     # 변경된 resource 값으로 배포
-    await process_helm_chart(plog_config_dto)
+    if workload_type == "statefulset":
+        await process_helm_chart(plog_config_dto, "statefulset")
+    else:
+        await process_helm_chart(plog_config_dto)
 
     response = {
         "past" : {
@@ -347,4 +378,83 @@ async def create_and_save_version_detail(
     await db.refresh(version_detail)
 
     logger.info(f"Created version detail for deployment: {deployment_name}, version_id: {openapi_spec_version_id}")
+    return version_detail
+
+async def create_and_save_version_detail_from_statefulset(
+             db,
+             openapi_spec_version_id: int,
+             pod_name: str,
+             namespace: str = "test"
+):
+    """
+    Pod 이름으로부터 StatefulSet을 찾아서 OpenAPISpecVersionDetail을 생성하고 DB에 저장
+
+    Args:
+        db: 데이터베이스 세션
+        openapi_spec_version_id (int): OpenAPI Spec Version ID
+        pod_name (str): Pod 이름
+        namespace (str): 네임스페이스
+
+    Returns:
+        OpenAPISpecVersionDetailModel: 생성된 version detail 객체
+    """
+    deploy_service = DeployService()
+    service_service = ServiceService()
+    from app.models.sqlite.models import OpenAPISpecVersionDetailModel
+
+    # Pod에서 StatefulSet 이름 찾기
+    statefulset_name = deploy_service.find_statefulset_name_from_pod(pod_name, namespace)
+
+    if not statefulset_name:
+        raise Exception(f"Could not find statefulset for pod: {pod_name}")
+
+    # StatefulSet 정보로부터 detail 추출
+    statefulset = deploy_service.get_statefulset_details(statefulset_name, namespace)
+    statefulset_dict = statefulset.to_dict()
+
+    logger.info(f"StatefulSet dict keys: {statefulset_dict.keys()}")
+    logger.info(f"Spec keys: {statefulset_dict.get('spec', {}).keys()}")
+    logger.info(f"Selector: {statefulset_dict.get('spec', {}).get('selector', {})}")
+
+    image_url = statefulset_dict["spec"]["template"]["spec"]["containers"][0]["image"]
+    logger.info(f"Image URL: {image_url}")
+
+    repo_part, image_tag = image_url.rsplit(":", 1)
+    registry, repository = repo_part.split("/", 1)
+
+    # match_labels 키 확인 후 접근
+    selector = statefulset_dict.get("spec", {}).get("selector", {})
+    labels = selector.get("match_labels") or selector.get("matchLabels", {})
+
+    logger.info(f"Extracted labels: {labels}")
+
+    services = service_service.get_service_by_labels(labels)
+    service = services[0]
+
+    # app_name 추출 (metadata에서)
+    app_name = statefulset_dict.get("metadata", {}).get("labels", {}).get("app", statefulset_name)
+
+    # replicas 추출
+    replicas = statefulset_dict.get("spec", {}).get("replicas", 1)
+
+    # OpenAPISpecVersionDetail 객체 생성
+    version_detail = OpenAPISpecVersionDetailModel(
+        openapi_spec_version_id=openapi_spec_version_id,
+        image_registry_url=registry,
+        app_name=app_name,
+        replicas=replicas,
+        node_port=service["ports"][0].get("node_port"),
+        port=service["ports"][0]["port"],
+        image_tag=image_tag,
+        git_info=None,
+        resources=statefulset.spec.template.spec.containers[0].resources.to_dict() if statefulset.spec.template.spec.containers[0].resources else {},
+        volumes={},  # PlogConfigDTO는 dict를 기대
+        env={env.name: env.value for env in (statefulset.spec.template.spec.containers[0].env or [])},  # dict 형태로 변환
+    )
+
+    db.add(version_detail)
+    await db.commit()
+    await db.refresh(version_detail)
+
+    logger.info(f"Created version detail for statefulset: {statefulset_name}, version_id: {openapi_spec_version_id}")
     return version_detail

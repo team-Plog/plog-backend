@@ -190,13 +190,17 @@ def save_openapi_spec(db: Session, openapi_spec_model: OpenAPISpecModel) -> Open
 
     return openapi_spec_model
 
-async def process_helm_chart(request: PlogConfigDTO):
+async def process_helm_chart(request: PlogConfigDTO, type: str = "deployment"):
     # 1. PlogConfigDTO를 Helm values.yaml로 변환
     helm_generator = HelmValuesGenerator()
+    helm_executor = HelmExecutor()
     values_yaml_content = helm_generator.generate_values_yaml(request)
 
     # 2. PLOG_HELM_CHART_FOLDER 환경변수에서 경로 가져오기
     helm_chart_folder = os.getenv("PLOG_HELM_CHART_FOLDER")
+    helm_chart_deploy = os.path.join(helm_chart_folder, "deploy")
+    helm_chart_sts = os.path.join(helm_chart_folder, "sts")
+
     if not helm_chart_folder:
         raise EnvironmentError("PLOG_HELM_CHART_FOLDER 환경변수가 설정되지 않았습니다.")
 
@@ -207,23 +211,33 @@ async def process_helm_chart(request: PlogConfigDTO):
     if FileWriter.file_exists(target_file_path):
         FileWriter.remove_file(target_file_path)
 
-    # 4. values.yaml 파일 저장
-    saved_path = FileWriter.write_to_path(
-        content=values_yaml_content,
-        filename="values.yaml",
-        base_path=helm_chart_folder,
-    )
+    if type == "deployment":
+        saved_path = FileWriter.write_to_path(
+            content=values_yaml_content,
+            filename="values.yaml",
+            base_path=helm_chart_deploy,
+        )
+
+        deployment_result = await helm_executor.upgrade_install(
+            chart_path=helm_chart_deploy,
+            app_name=request.app_name,
+            namespace="test"
+        )
+
+    elif type == "statefulset":
+        saved_path = FileWriter.write_to_path(
+            content=values_yaml_content,
+            filename="values.yaml",
+            base_path=helm_chart_sts,
+        )
+
+        deployment_result = await helm_executor.upgrade_install(
+            chart_path=helm_chart_sts,
+            app_name=request.app_name,
+            namespace="test"
+        )
 
     logger.info(f"2. values.yaml 파일 업데이트 완료: {saved_path}")
-    # ex) app_name = semi-medeasy -> service_name = semi_medeasy_service
-    helm_executor = HelmExecutor()
-    deployment_result = await helm_executor.upgrade_install(
-        chart_path=helm_chart_folder,
-        app_name=request.app_name,
-        namespace="test"
-    )
-
-
 
 async def deploy_openapi_spec(db: Session, request: PlogConfigDTO) -> dict:
     """

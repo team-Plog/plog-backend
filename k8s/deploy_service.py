@@ -257,3 +257,51 @@ class DeployService:
         except Exception as e:
             logger.error(f"Error finding deployment for pod {pod_name}: {e}")
             return None
+
+    def get_statefulset_details(self, statefulset_name: str, namespace: str = "test"):
+        """
+        StatefulSet 상세 정보 조회
+
+        Args:
+            statefulset_name (str): StatefulSet 이름
+            namespace (str): 네임스페이스
+
+        Returns:
+            StatefulSet 객체 또는 None
+        """
+        try:
+            statefulset_info = self.apps_v1.read_namespaced_stateful_set(
+                name=statefulset_name,
+                namespace=namespace
+            )
+
+            return statefulset_info
+
+        except K8sApiException as e:
+            logger.error(f"Failed to get statefulset {statefulset_name}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error getting statefulset {statefulset_name}: {e}")
+            return None
+
+    def find_statefulset_name_from_pod(self, pod_name: str, namespace: str = "test") -> Optional[str]:
+        """
+        Pod 이름으로부터 StatefulSet 이름을 찾기
+        Pod → StatefulSet owner reference 추적
+        """
+        try:
+            # Pod 정보 조회
+            pod = self.core_v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+
+            # Pod의 owner reference에서 StatefulSet 찾기
+            if pod.metadata.owner_references:
+                for owner in pod.metadata.owner_references:
+                    if owner.kind == "StatefulSet":
+                        return owner.name
+
+            logger.warning(f"Could not find statefulset for pod: {pod_name}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error finding statefulset for pod {pod_name}: {e}")
+            return None

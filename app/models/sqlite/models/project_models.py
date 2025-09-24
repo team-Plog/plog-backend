@@ -37,24 +37,6 @@ class OpenAPISpecVersionModel(Base):
     openapi_spec = relationship("OpenAPISpecModel", back_populates="openapi_spec_versions")
 
     endpoints = relationship("EndpointModel", back_populates="openapi_spec_version", cascade="all, delete")
-    version_detail = relationship("OpenAPISpecVersionDetailModel", back_populates="openapi_spec_version", uselist=False, cascade="all, delete-orphan")
-
-class OpenAPISpecVersionDetailModel(Base):
-    __tablename__ = "openapi_spec_version_detail"
-    id = Column(Integer, primary_key=True, index=True)
-    image_registry_url = Column(String, nullable=True)
-    openapi_spec_version_id = Column(Integer, ForeignKey("openapi_spec_version.id"), nullable=False)
-    app_name = Column(String, nullable=True)
-    replicas = Column(Integer, nullable=True)
-    node_port = Column(Integer, nullable=True)
-    port = Column(Integer, nullable=True)
-    image_tag = Column(String, nullable=True)
-    git_info = Column(JSON, nullable=True)
-    resources = Column(JSON, nullable=True)
-    volumes = Column(JSON, nullable=True)
-    env = Column(JSON, nullable=True)
-
-    openapi_spec_version = relationship("OpenAPISpecVersionModel", back_populates="version_detail")
 
 # 서버와 연결된 POD 정보
 class ServerInfraModel(Base):
@@ -72,7 +54,25 @@ class ServerInfraModel(Base):
     namespace = Column(String, nullable=True)
 
     tests_resources = relationship("TestResourceTimeseriesModel", back_populates="server_infra")
+    infra_detail = relationship("ServerInfraDetailModel", back_populates="server_infra", uselist=False, cascade="all, delete-orphan")
 
+
+class ServerInfraDetailModel(Base):
+    __tablename__ = "server_infra_detail"
+    id = Column(Integer, primary_key=True, index=True)
+    image_registry_url = Column(String, nullable=True)
+    server_infra_id = Column(Integer, ForeignKey("server_infra.id"), nullable=False)
+    app_name = Column(String, nullable=True)
+    replicas = Column(Integer, nullable=True)
+    node_port = Column(Integer, nullable=True)
+    port = Column(Integer, nullable=True)
+    image_tag = Column(String, nullable=True)
+    git_info = Column(JSON, nullable=True)
+    resources = Column(JSON, nullable=True)
+    volumes = Column(JSON, nullable=True)
+    env = Column(JSON, nullable=True)
+
+    server_infra = relationship("ServerInfraModel", back_populates="infra_detail")
 
 # 엔드포인트
 class EndpointModel(Base):
